@@ -1,0 +1,9 @@
+streamlit
+pandas
+pykrx
+ta
+requests
+beautifulsoup4
+lxml
+plotly
+streamlit-aggrid
