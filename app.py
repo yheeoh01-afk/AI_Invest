@@ -79,7 +79,7 @@ except Exception:
 
 
 # =========================================================
-# AI 투자비서 V9.4 Cloud
+# AI 투자비서 V9.5 Cloud
 # 기능:
 # - 포트폴리오 조회 / 추가 / 수정 / 삭제
 # - CSV 저장
@@ -91,7 +91,7 @@ except Exception:
 # =========================================================
 
 st.set_page_config(
-    page_title="AI 투자비서 V9.4 Cloud",
+    page_title="AI 투자비서 V9.5 Cloud",
     page_icon="📈",
     layout="wide"
 )
@@ -147,7 +147,7 @@ def require_login():
                     st.error("비밀번호가 맞지 않습니다.")
 
     if not st.session_state["auth_user"]:
-        st.title("📈 AI 투자비서 V9.4 Cloud")
+        st.title("📈 AI 투자비서 V9.5 Cloud")
         st.info("왼쪽 사이드바에서 로그인하세요.")
         st.stop()
 
@@ -559,46 +559,73 @@ def get_price_data(ticker, days=220):
 
 @st.cache_data(ttl=60 * 30)
 def get_investor_trading_data(ticker, days=45):
-    """종목별 외국인/기관 순매수 수량 조회.
-
-    PyKRX의 get_market_trading_volume_by_date를 사용합니다.
-    반환 컬럼명은 PyKRX 버전에 따라 조금 다를 수 있어 외국인/기관 컬럼을 유연하게 찾습니다.
     """
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=days * 2)
+    외국인/기관 수급 데이터 조회.
+    Cloud/PyKRX 환경에서 날짜·컬럼·조회함수 차이로 실패할 수 있어
+    거래량 기준과 거래대금 기준을 순차적으로 재시도합니다.
+    """
+    if not ticker:
+        return pd.DataFrame()
+
+    ticker = str(ticker).zfill(6)
+    last_error = ""
 
     try:
-        df = stock.get_market_trading_volume_by_date(
-            start_date.strftime("%Y%m%d"),
-            end_date.strftime("%Y%m%d"),
-            ticker
-        )
-    except Exception:
+        end_date = datetime.today()
+        start_date = end_date - timedelta(days=max(days * 5, 180))
+        start = start_date.strftime("%Y%m%d")
+        end = end_date.strftime("%Y%m%d")
+
+        df = pd.DataFrame()
+
+        # 1차: 거래량 기준
+        try:
+            df = stock.get_market_trading_volume_by_date(start, end, ticker)
+        except Exception as e:
+            last_error = f"거래량 기준 실패: {type(e).__name__}"
+
+        # 2차: 거래대금 기준
+        if df is None or df.empty:
+            try:
+                df = stock.get_market_trading_value_by_date(start, end, ticker)
+            except Exception as e:
+                last_error = f"거래대금 기준 실패: {type(e).__name__}"
+
+        if df is None or df.empty:
+            st.session_state["supply_error"] = f"{ticker} 수급 원자료 없음. {last_error}"
+            return pd.DataFrame()
+
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+
+        foreign_col = None
+        institution_col = None
+
+        for col in df.columns:
+            col_text = str(col)
+            if foreign_col is None and "외국인" in col_text:
+                foreign_col = col
+            if institution_col is None and ("기관" in col_text or "기관합계" in col_text):
+                institution_col = col
+
+        if foreign_col is None and institution_col is None:
+            st.session_state["supply_error"] = f"{ticker} 수급 컬럼 없음: {list(df.columns)}"
+            return pd.DataFrame()
+
+        result = pd.DataFrame(index=df.index)
+        result["외국인"] = pd.to_numeric(df[foreign_col], errors="coerce").fillna(0) if foreign_col is not None else 0
+        result["기관"] = pd.to_numeric(df[institution_col], errors="coerce").fillna(0) if institution_col is not None else 0
+
+        result = result.tail(days).copy()
+        result["외국인_누적"] = result["외국인"].cumsum()
+        result["기관_누적"] = result["기관"].cumsum()
+
+        st.session_state["supply_error"] = ""
+        return result
+    except Exception as e:
+        st.session_state["supply_error"] = f"{ticker} 수급 조회 실패: {type(e).__name__}"
         return pd.DataFrame()
 
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    df = df.copy()
-    df.index = pd.to_datetime(df.index)
-
-    foreign_col = None
-    institution_col = None
-
-    for col in df.columns:
-        col_text = str(col)
-        if "외국인" in col_text:
-            foreign_col = col
-        if "기관" in col_text:
-            institution_col = col
-
-    result = pd.DataFrame(index=df.index)
-    result["외국인"] = df[foreign_col] if foreign_col is not None else 0
-    result["기관"] = df[institution_col] if institution_col is not None else 0
-    result["외국인_누적"] = result["외국인"].cumsum()
-    result["기관_누적"] = result["기관"].cumsum()
-
-    return result.tail(days)
 
 
 def analyze_sell_signal(price_df, supply_df=None):
@@ -1954,7 +1981,7 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
         c5.metric("수급신호", supply["수급신호"])
 
         if supply_df.empty:
-            st.warning("수급 데이터를 불러오지 못했습니다.")
+            st.warning(st.session_state.get("supply_error", "수급 데이터를 불러오지 못했습니다."))
         else:
             st.write("외국인·기관 누적 순매수 추이")
             st.line_chart(supply_df[["외국인_누적", "기관_누적"]], use_container_width=True)
@@ -1972,7 +1999,7 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
     with detail_tabs[2]:
         client_id, client_secret = get_naver_keys()
         if not client_id or not client_secret:
-            st.warning(".streamlit/secrets.toml에 NAVER_CLIENT_ID, NAVER_CLIENT_SECRET을 넣으면 뉴스가 표시됩니다.")
+            st.warning("Streamlit Cloud의 Manage app > Settings > Secrets에 NAVER_CLIENT_ID, NAVER_CLIENT_SECRET을 넣으면 뉴스가 표시됩니다.")
 
         news_items = get_news(company_name, display=10)
         if not news_items:
@@ -1992,7 +2019,7 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
 # -----------------------------
 # 화면 시작
 # -----------------------------
-st.title("📈 AI 투자비서 V9.4 Cloud")
+st.title("📈 AI 투자비서 V9.5 Cloud")
 st.caption("포트폴리오 통합관리 · 선택종목 상세분석 · 관심그룹 · 스크리너 · 백테스트")
 
 with st.sidebar:
@@ -2152,33 +2179,62 @@ with tab1:
 
 with st.expander("➕ 포트폴리오 추가/수정/삭제", expanded=False):
     st.subheader("종목 추가")
+    st.caption("종목명을 입력하면 종목코드가 즉시 자동 표시됩니다. 자동 표시가 안 되면 종목코드를 직접 입력하세요.")
 
-    with st.form("add_stock_form", clear_on_submit=True):
-        col1, col2, col3, col4 = st.columns(4)
-        new_name = col1.text_input("종목명", placeholder="예: 삼성전자")
-        new_code = col2.text_input("종목코드(선택)", placeholder="예: 005930")
-        new_qty = col3.number_input("수량", min_value=0, step=1)
-        new_avg = col4.number_input("평균매수가", min_value=0.0, step=100.0)
+    col1, col2, col3, col4 = st.columns(4)
 
-        add_submitted = st.form_submit_button("추가")
+    new_name = col1.text_input(
+        "종목명",
+        placeholder="예: 삼성전자",
+        key="add_stock_name_live"
+    )
 
-        if add_submitted:
-            if not new_name.strip():
-                st.error("종목명을 입력하세요.")
-            elif new_qty <= 0 or new_avg <= 0:
-                st.error("수량과 평균매수가는 0보다 커야 합니다.")
-            else:
-                new_row = pd.DataFrame([{
-                    "종목명": new_name.strip(),
-                    "종목코드": new_code.strip().zfill(6) if new_code.strip() else find_ticker(new_name.strip()) or "",
-                    "수량": int(new_qty),
-                    "평균매수가": float(new_avg),
-                    "투자액": int(new_qty) * float(new_avg),
-                }])
-                portfolio_df = pd.concat([portfolio_df, new_row], ignore_index=True)
-                save_portfolio(portfolio_df)
-                st.success(f"{new_name} 추가 완료")
-                st.rerun()
+    auto_code = find_ticker(new_name.strip()) if new_name and new_name.strip() else ""
+
+    new_code = col2.text_input(
+        "종목코드(자동/수동)",
+        value=auto_code or "",
+        placeholder="예: 005930",
+        key=f"add_stock_code_live_{auto_code or 'blank'}"
+    )
+
+    new_qty = col3.number_input(
+        "수량",
+        min_value=0,
+        step=1,
+        key="add_stock_qty_live"
+    )
+
+    new_avg = col4.number_input(
+        "평균매수가",
+        min_value=0.0,
+        step=100.0,
+        key="add_stock_avg_live"
+    )
+
+    if new_name and auto_code:
+        st.success(f"{new_name} → {auto_code} 자동 매칭")
+    elif new_name and not auto_code:
+        st.warning("종목코드를 자동으로 찾지 못했습니다. 종목코드를 직접 입력하세요.")
+
+    if st.button("추가", key="add_stock_button_live"):
+        if not new_name.strip():
+            st.error("종목명을 입력하세요.")
+        elif new_qty <= 0 or new_avg <= 0:
+            st.error("수량과 평균매수가는 0보다 커야 합니다.")
+        else:
+            final_code = new_code.strip().zfill(6) if new_code.strip() else find_ticker(new_name.strip()) or ""
+            new_row = pd.DataFrame([{
+                "종목명": new_name.strip(),
+                "종목코드": final_code,
+                "수량": int(new_qty),
+                "평균매수가": float(new_avg),
+                "투자액": int(new_qty) * float(new_avg),
+            }])
+            portfolio_df = pd.concat([portfolio_df, new_row], ignore_index=True)
+            save_portfolio(portfolio_df)
+            st.success(f"{new_name} 추가 완료")
+            st.rerun()
 
     st.divider()
     st.subheader("수정")
