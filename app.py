@@ -79,7 +79,7 @@ except Exception:
 
 
 # =========================================================
-# AI 투자비서 V9.1 Cloud Final.1 Cloud Final.13
+# AI 투자비서 V9.2 Cloud Final.13
 # 기능:
 # - 포트폴리오 조회 / 추가 / 수정 / 삭제
 # - CSV 저장
@@ -91,7 +91,7 @@ except Exception:
 # =========================================================
 
 st.set_page_config(
-    page_title="AI 투자비서 V9.1 Cloud Final.1 Cloud Final",
+    page_title="AI 투자비서 V9.2 Cloud Final",
     page_icon="📈",
     layout="wide"
 )
@@ -147,7 +147,7 @@ def require_login():
                     st.error("비밀번호가 맞지 않습니다.")
 
     if not st.session_state["auth_user"]:
-        st.title("📈 AI 투자비서 V9.1 Cloud Final")
+        st.title("📈 AI 투자비서 V9.2 Cloud Final")
         st.info("왼쪽 사이드바에서 로그인하세요.")
         st.stop()
 
@@ -1969,7 +1969,7 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
 # -----------------------------
 # 화면 시작
 # -----------------------------
-st.title("📈 AI 투자비서 V9.1 Cloud Final")
+st.title("📈 AI 투자비서 V9.2 Cloud Final.13")
 st.caption("포트폴리오 통합관리 · 선택종목 상세분석 · 관심그룹 · 스크리너 · 백테스트")
 
 with st.sidebar:
