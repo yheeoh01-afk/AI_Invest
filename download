@@ -1,0 +1,8 @@
+# 실제 값은 GitHub에 올리지 말고 Streamlit Cloud > Settings > Secrets에 넣으세요.
+
+NAVER_CLIENT_ID = "여기에_네이버_CLIENT_ID"
+NAVER_CLIENT_SECRET = "여기에_네이버_CLIENT_SECRET"
+
+[USERS]
+younghee = "내비밀번호"
+sister = "언니비밀번호"
