@@ -1,10 +1,1 @@
-streamlit
-pandas
-pykrx
-ta
-requests
-beautifulsoup4
-lxml
-plotly
-streamlit-aggrid
-setuptools<81
+python-3.11
