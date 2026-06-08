@@ -79,7 +79,7 @@ except Exception:
 
 
 # =========================================================
-# AI 투자비서 V9.3 Cloud Final.13
+# AI 투자비서 V9.4 Cloud
 # 기능:
 # - 포트폴리오 조회 / 추가 / 수정 / 삭제
 # - CSV 저장
@@ -91,7 +91,7 @@ except Exception:
 # =========================================================
 
 st.set_page_config(
-    page_title="AI 투자비서 V9.3 Cloud Final",
+    page_title="AI 투자비서 V9.4 Cloud",
     page_icon="📈",
     layout="wide"
 )
@@ -147,7 +147,7 @@ def require_login():
                     st.error("비밀번호가 맞지 않습니다.")
 
     if not st.session_state["auth_user"]:
-        st.title("📈 AI 투자비서 V9.3 Cloud Final")
+        st.title("📈 AI 투자비서 V9.4 Cloud")
         st.info("왼쪽 사이드바에서 로그인하세요.")
         st.stop()
 
@@ -389,31 +389,34 @@ def analyze_watch_stock(company, ticker_hint=None):
 # PyKRX 데이터
 # -----------------------------
 MANUAL_TICKER_MAP = {
-    # 사용자가 자주 입력하는 표기 / PyKRX 종목명 매칭 보정
-    "엘지씨엔에스": "064400",
-    "lg씨엔에스": "064400",
-    "lgcns": "064400",
-    "lg cns": "064400",
+    "삼성전자": "005930",
     "현대차": "005380",
+    "기아": "000270",
+    "sk하이닉스": "000660",
+    "에스케이하이닉스": "000660",
+    "lg에너지솔루션": "373220",
+    "엘지에너지솔루션": "373220",
+    "lg화학": "051910",
+    "엘지화학": "051910",
     "lg이노텍": "011070",
     "엘지이노텍": "011070",
-    "코오롱인더": "120110",
-    "에스피지": "058610",
-    "삼성전자": "005930",
+    "lg씨엔에스": "064400",
+    "엘지씨엔에스": "064400",
+    "lg cns": "064400",
+    "lgcns": "064400",
+    "naver": "035420",
+    "네이버": "035420",
     "posco홀딩스": "005490",
     "포스코홀딩스": "005490",
     "셀트리온": "068270",
     "한화솔루션": "009830",
-    "naver": "035420",
-    "네이버": "035420",
-    "디아이씨": "092200",
-    "lg에너지솔루션": "373220",
-    "엘지에너지솔루션": "373220",
+    "코오롱인더": "120110",
+    "에스피지": "058610",
+    "현대모비스": "012330",
+    "현대건설": "000720",
     "삼성전기": "009150",
     "브이티": "018290",
-    "현대건설": "000720",
     "케이엠더블유": "032500",
-    "현대모비스": "012330",
     "오이솔루션": "138080",
     "두산에너빌리티": "034020",
     "솔루스첨단소재": "336370",
@@ -431,7 +434,9 @@ MANUAL_TICKER_MAP = {
     "아비코전자": "036010",
     "현대오토에버": "307950",
     "텔레칩스": "054450",
+    "디아이씨": "092200",
 }
+
 
 
 @st.cache_data(ttl=60 * 60 * 12)
@@ -476,27 +481,41 @@ def find_ticker(company_name):
     if compact.isdigit():
         return compact.zfill(6)
 
-    # 수동 보정표를 먼저 확인: PyKRX 종목명 표기 차이, 영문/한글 혼용 보정
+    # 자주 쓰는 표기 우선 보정
     if name.lower() in MANUAL_TICKER_MAP:
         return MANUAL_TICKER_MAP[name.lower()]
     if compact in MANUAL_TICKER_MAP:
         return MANUAL_TICKER_MAP[compact]
 
-    mapping = get_all_ticker_name_map()
+    try:
+        mapping = get_all_ticker_name_map()
 
-    ticker = mapping.get(name.lower())
-    if ticker:
-        return ticker
-
-    ticker = mapping.get(compact)
-    if ticker:
-        return ticker
-
-    for listed_name, ticker in mapping.items():
-        if compact == listed_name.replace(" ", "").lower():
+        ticker = mapping.get(name.lower())
+        if ticker:
             return ticker
 
+        ticker = mapping.get(compact)
+        if ticker:
+            return ticker
+
+        # 공백 제거 완전 일치
+        for listed_name, ticker in mapping.items():
+            if compact == listed_name.replace(" ", "").lower():
+                return ticker
+
+        # 부분 일치 보조: 사용자가 일부만 입력했을 때
+        candidates = []
+        for listed_name, ticker in mapping.items():
+            listed_compact = listed_name.replace(" ", "").lower()
+            if compact in listed_compact or listed_compact in compact:
+                candidates.append((listed_name, ticker))
+        if len(candidates) == 1:
+            return candidates[0][1]
+    except Exception:
+        pass
+
     return None
+
 
 
 @st.cache_data(ttl=60 * 30)
@@ -1957,7 +1976,11 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
 
         news_items = get_news(company_name, display=10)
         if not news_items:
-            st.info("뉴스가 없거나 네이버 API 설정/조회에 문제가 있습니다.")
+            err = st.session_state.get("naver_news_error", "")
+            if err:
+                st.warning(err)
+            else:
+                st.info("뉴스가 없거나 네이버 API 설정/조회에 문제가 있습니다. Streamlit Cloud Settings > Secrets에 NAVER_CLIENT_ID / NAVER_CLIENT_SECRET을 확인하세요.")
         else:
             for item in news_items:
                 st.markdown(f"**[{item['제목']}]({item['링크']})**")
@@ -1969,7 +1992,7 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
 # -----------------------------
 # 화면 시작
 # -----------------------------
-st.title("📈 AI 투자비서 V9.3 Cloud Final.13")
+st.title("📈 AI 투자비서 V9.4 Cloud")
 st.caption("포트폴리오 통합관리 · 선택종목 상세분석 · 관심그룹 · 스크리너 · 백테스트")
 
 with st.sidebar:
