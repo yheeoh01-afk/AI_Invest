@@ -2,4 +2,8 @@ streamlit
 pandas
 requests
 pykrx
-st-aggrid
+streamlit-aggrid
+lxml
+html5lib
+beautifulsoup4
+plotly
