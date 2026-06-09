@@ -3,7 +3,4 @@ pandas
 requests
 pykrx
 streamlit-aggrid
-lxml
-html5lib
-beautifulsoup4
-plotly
+setuptools
