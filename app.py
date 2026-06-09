@@ -79,7 +79,7 @@ except Exception:
 
 
 # =========================================================
-# AI 투자비서 V9.5 Cloud
+# AI 투자비서 V9.6 Cloud
 # 기능:
 # - 포트폴리오 조회 / 추가 / 수정 / 삭제
 # - CSV 저장
@@ -91,7 +91,7 @@ except Exception:
 # =========================================================
 
 st.set_page_config(
-    page_title="AI 투자비서 V9.5 Cloud",
+    page_title="AI 투자비서 V9.6 Cloud",
     page_icon="📈",
     layout="wide"
 )
@@ -137,9 +137,12 @@ def require_login():
                 st.session_state["auth_user"] = None
                 st.rerun()
         else:
-            user_id = st.selectbox("사용자", list(users.keys()), key="login_user")
-            password = st.text_input("비밀번호", type="password", key="login_password")
-            if st.button("로그인"):
+            with st.form("login_form"):
+                user_id = st.selectbox("사용자", list(users.keys()), key="login_user")
+                password = st.text_input("비밀번호", type="password", key="login_password")
+                login_submitted = st.form_submit_button("로그인")
+
+            if login_submitted:
                 if users.get(user_id) == password:
                     st.session_state["auth_user"] = user_id
                     st.rerun()
@@ -147,7 +150,7 @@ def require_login():
                     st.error("비밀번호가 맞지 않습니다.")
 
     if not st.session_state["auth_user"]:
-        st.title("📈 AI 투자비서 V9.5 Cloud")
+        st.title("📈 AI 투자비서 V9.6 Cloud")
         st.info("왼쪽 사이드바에서 로그인하세요.")
         st.stop()
 
@@ -561,60 +564,73 @@ def get_price_data(ticker, days=220):
 def get_investor_trading_data(ticker, days=45):
     """
     외국인/기관 수급 데이터 조회.
-    Cloud/PyKRX 환경에서 날짜·컬럼·조회함수 차이로 실패할 수 있어
-    거래량 기준과 거래대금 기준을 순차적으로 재시도합니다.
+    PyKRX Cloud 환경에서 오류가 잦아 가장 단순한 순매수 수량 조회를 기본으로 사용합니다.
     """
     if not ticker:
         return pd.DataFrame()
 
-    ticker = str(ticker).zfill(6)
-    last_error = ""
+    ticker = str(ticker).strip().zfill(6)
 
     try:
         end_date = datetime.today()
-        start_date = end_date - timedelta(days=max(days * 5, 180))
+
+        # 휴일/비거래일 고려해서 넉넉히 조회
+        start_date = end_date - timedelta(days=365)
+
         start = start_date.strftime("%Y%m%d")
         end = end_date.strftime("%Y%m%d")
 
-        df = pd.DataFrame()
-
-        # 1차: 거래량 기준
+        # 순매수 수량 조회
         try:
-            df = stock.get_market_trading_volume_by_date(start, end, ticker)
-        except Exception as e:
-            last_error = f"거래량 기준 실패: {type(e).__name__}"
-
-        # 2차: 거래대금 기준
-        if df is None or df.empty:
+            raw = stock.get_market_trading_volume_by_date(start, end, ticker)
+        except Exception as e1:
+            # 보조: 순매수 거래대금 조회
             try:
-                df = stock.get_market_trading_value_by_date(start, end, ticker)
-            except Exception as e:
-                last_error = f"거래대금 기준 실패: {type(e).__name__}"
+                raw = stock.get_market_trading_value_by_date(start, end, ticker)
+            except Exception as e2:
+                st.session_state["supply_error"] = (
+                    f"{ticker} 수급 조회 실패: volume={type(e1).__name__}, value={type(e2).__name__}"
+                )
+                return pd.DataFrame()
 
-        if df is None or df.empty:
-            st.session_state["supply_error"] = f"{ticker} 수급 원자료 없음. {last_error}"
+        if raw is None or raw.empty:
+            st.session_state["supply_error"] = f"{ticker} 수급 원자료가 비어 있습니다."
             return pd.DataFrame()
 
-        df = df.copy()
-        df.index = pd.to_datetime(df.index)
+        raw = raw.copy()
+        raw.index = pd.to_datetime(raw.index)
+
+        # 컬럼명 확인
+        cols = [str(c) for c in raw.columns]
 
         foreign_col = None
-        institution_col = None
+        inst_col = None
 
-        for col in df.columns:
-            col_text = str(col)
-            if foreign_col is None and "외국인" in col_text:
+        for col in raw.columns:
+            name = str(col)
+            if foreign_col is None and ("외국인" in name or "외인" in name):
                 foreign_col = col
-            if institution_col is None and ("기관" in col_text or "기관합계" in col_text):
-                institution_col = col
+            if inst_col is None and ("기관" in name or "기관합계" in name):
+                inst_col = col
 
-        if foreign_col is None and institution_col is None:
-            st.session_state["supply_error"] = f"{ticker} 수급 컬럼 없음: {list(df.columns)}"
+        # 일부 pykrx에서는 기관합계 대신 기관 전체가 없고 세부 기관만 있을 수 있음
+        if inst_col is None:
+            institution_parts = []
+            for col in raw.columns:
+                name = str(col)
+                if any(k in name for k in ["금융투자", "보험", "투신", "사모", "은행", "연기금", "기타금융"]):
+                    institution_parts.append(col)
+            if institution_parts:
+                raw["기관합계_계산"] = raw[institution_parts].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+                inst_col = "기관합계_계산"
+
+        if foreign_col is None and inst_col is None:
+            st.session_state["supply_error"] = f"{ticker} 수급 컬럼을 찾지 못했습니다. 컬럼: {cols}"
             return pd.DataFrame()
 
-        result = pd.DataFrame(index=df.index)
-        result["외국인"] = pd.to_numeric(df[foreign_col], errors="coerce").fillna(0) if foreign_col is not None else 0
-        result["기관"] = pd.to_numeric(df[institution_col], errors="coerce").fillna(0) if institution_col is not None else 0
+        result = pd.DataFrame(index=raw.index)
+        result["외국인"] = pd.to_numeric(raw[foreign_col], errors="coerce").fillna(0) if foreign_col is not None else 0
+        result["기관"] = pd.to_numeric(raw[inst_col], errors="coerce").fillna(0) if inst_col is not None else 0
 
         result = result.tail(days).copy()
         result["외국인_누적"] = result["외국인"].cumsum()
@@ -622,8 +638,9 @@ def get_investor_trading_data(ticker, days=45):
 
         st.session_state["supply_error"] = ""
         return result
+
     except Exception as e:
-        st.session_state["supply_error"] = f"{ticker} 수급 조회 실패: {type(e).__name__}"
+        st.session_state["supply_error"] = f"{ticker} 수급 처리 실패: {type(e).__name__}"
         return pd.DataFrame()
 
 
@@ -1982,6 +1999,7 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
 
         if supply_df.empty:
             st.warning(st.session_state.get("supply_error", "수급 데이터를 불러오지 못했습니다."))
+            st.caption("종목코드가 정확한지 확인하세요. 예: 삼성전자 005930, 현대차 005380")
         else:
             st.write("외국인·기관 누적 순매수 추이")
             st.line_chart(supply_df[["외국인_누적", "기관_누적"]], use_container_width=True)
@@ -2019,7 +2037,7 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
 # -----------------------------
 # 화면 시작
 # -----------------------------
-st.title("📈 AI 투자비서 V9.5 Cloud")
+st.title("📈 AI 투자비서 V9.6 Cloud")
 st.caption("포트폴리오 통합관리 · 선택종목 상세분석 · 관심그룹 · 스크리너 · 백테스트")
 
 with st.sidebar:
@@ -2211,11 +2229,6 @@ with st.expander("➕ 포트폴리오 추가/수정/삭제", expanded=False):
         step=100.0,
         key="add_stock_avg_live"
     )
-
-    if new_name and auto_code:
-        st.success(f"{new_name} → {auto_code} 자동 매칭")
-    elif new_name and not auto_code:
-        st.warning("종목코드를 자동으로 찾지 못했습니다. 종목코드를 직접 입력하세요.")
 
     if st.button("추가", key="add_stock_button_live"):
         if not new_name.strip():
