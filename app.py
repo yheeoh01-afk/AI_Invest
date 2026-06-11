@@ -199,6 +199,167 @@ def configure_user_files():
     return user_id, user_dir
 
 
+# -----------------------------
+# Supabase 영구 저장소
+# -----------------------------
+def get_supabase_config():
+    try:
+        url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
+        key = str(st.secrets.get("SUPABASE_ANON_KEY", st.secrets.get("SUPABASE_KEY", ""))).strip()
+    except Exception:
+        url, key = "", ""
+    return url, key
+
+
+def supabase_enabled():
+    url, key = get_supabase_config()
+    return bool(url and key)
+
+
+def supabase_headers(prefer=None):
+    _, key = get_supabase_config()
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
+
+
+def supabase_request(method, path, **kwargs):
+    url, _ = get_supabase_config()
+    full_url = f"{url}/rest/v1/{path.lstrip('/')}"
+    try:
+        response = requests.request(method, full_url, timeout=20, **kwargs)
+        if response.status_code >= 400:
+            raise RuntimeError(f"Supabase 오류 {response.status_code}: {response.text[:300]}")
+        if response.text:
+            return response.json()
+        return []
+    except Exception as e:
+        st.warning(f"Supabase 연결 실패: {e} / 임시 CSV 저장소를 사용합니다.")
+        return None
+
+
+def sb_user():
+    return _safe_username(st.session_state.get("user_id", "default"))
+
+
+def load_portfolio_from_supabase():
+    if not supabase_enabled():
+        return None
+    user = sb_user()
+    data = supabase_request(
+        "GET",
+        f"portfolios?user_id=eq.{user}&select=stock_name,ticker,quantity,avg_price,investment&order=stock_name.asc",
+        headers=supabase_headers(),
+    )
+    if data is None:
+        return None
+    rows = []
+    for r in data:
+        rows.append({
+            "종목명": r.get("stock_name", ""),
+            "종목코드": r.get("ticker", ""),
+            "수량": r.get("quantity", 0),
+            "평균매수가": r.get("avg_price", 0),
+            "투자액": r.get("investment", 0),
+        })
+    return pd.DataFrame(rows, columns=PORTFOLIO_COLUMNS)
+
+
+def save_portfolio_to_supabase(df):
+    if not supabase_enabled():
+        return False
+    user = sb_user()
+    df = normalize_portfolio(df)
+    # 사용자 기존 포트폴리오 전체 삭제 후 현재 표 기준으로 재저장
+    deleted = supabase_request(
+        "DELETE",
+        f"portfolios?user_id=eq.{user}",
+        headers=supabase_headers("return=minimal"),
+    )
+    if deleted is None:
+        return False
+    if df.empty:
+        return True
+    payload = []
+    for _, row in df.iterrows():
+        ticker = str(row.get("종목코드", "")).zfill(6) if str(row.get("종목코드", "")).strip() else ""
+        payload.append({
+            "user_id": user,
+            "stock_name": str(row.get("종목명", "")).strip(),
+            "ticker": ticker,
+            "quantity": int(to_number(row.get("수량", 0))),
+            "avg_price": float(to_number(row.get("평균매수가", 0))),
+            "investment": float(to_number(row.get("투자액", 0))),
+        })
+    inserted = supabase_request(
+        "POST",
+        "portfolios",
+        headers=supabase_headers("return=minimal"),
+        json=payload,
+    )
+    return inserted is not None
+
+
+def load_watchlist_from_supabase():
+    if not supabase_enabled():
+        return None
+    user = sb_user()
+    data = supabase_request(
+        "GET",
+        f"watchlists?user_id=eq.{user}&select=group_name,stock_name,ticker,memo&order=group_name.asc,stock_name.asc",
+        headers=supabase_headers(),
+    )
+    if data is None:
+        return None
+    rows = []
+    for r in data:
+        rows.append({
+            "그룹": r.get("group_name", "기본"),
+            "종목명": r.get("stock_name", ""),
+            "종목코드": r.get("ticker", ""),
+            "메모": r.get("memo", ""),
+        })
+    return pd.DataFrame(rows, columns=WATCHLIST_COLUMNS)
+
+
+def save_watchlist_to_supabase(df):
+    if not supabase_enabled():
+        return False
+    user = sb_user()
+    df = normalize_watchlist(df)
+    deleted = supabase_request(
+        "DELETE",
+        f"watchlists?user_id=eq.{user}",
+        headers=supabase_headers("return=minimal"),
+    )
+    if deleted is None:
+        return False
+    if df.empty:
+        return True
+    payload = []
+    for _, row in df.iterrows():
+        ticker = str(row.get("종목코드", "")).zfill(6) if str(row.get("종목코드", "")).strip() else ""
+        payload.append({
+            "user_id": user,
+            "group_name": str(row.get("그룹", "기본")).strip() or "기본",
+            "stock_name": str(row.get("종목명", "")).strip(),
+            "ticker": ticker,
+            "memo": str(row.get("메모", "")).strip(),
+        })
+    inserted = supabase_request(
+        "POST",
+        "watchlists",
+        headers=supabase_headers("return=minimal"),
+        json=payload,
+    )
+    return inserted is not None
+
+
 if not login_gate():
     st.stop()
 
@@ -289,6 +450,11 @@ def normalize_portfolio(df):
 
 
 def load_portfolio():
+    # Supabase 설정이 있으면 DB에서 먼저 불러옵니다. 실패/미설정 시 CSV로 자동 대체합니다.
+    sb_df = load_portfolio_from_supabase()
+    if sb_df is not None:
+        return normalize_portfolio(sb_df)
+
     df = ensure_csv_file(PORTFOLIO_FILE, PORTFOLIO_COLUMNS)
 
     # 기존 구버전 CSV 호환: 종목/평균가 컬럼명 보정
@@ -327,6 +493,8 @@ def load_portfolio():
 
 def save_portfolio(df):
     df = normalize_portfolio(df)
+    if save_portfolio_to_supabase(df):
+        return df
     df.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
     return df
 
@@ -368,6 +536,10 @@ def normalize_watchlist(df):
 
 
 def load_watchlist():
+    sb_df = load_watchlist_from_supabase()
+    if sb_df is not None:
+        return normalize_watchlist(sb_df)
+
     df = ensure_csv_file(WATCHLIST_FILE, WATCHLIST_COLUMNS)
 
     # 구버전/다른 버전 호환: 그룹명 -> 그룹
@@ -399,6 +571,8 @@ def load_watchlist():
 
 def save_watchlist(df):
     df = normalize_watchlist(df)
+    if save_watchlist_to_supabase(df):
+        return df
     df[WATCHLIST_COLUMNS].to_csv(WATCHLIST_FILE, index=False, encoding="utf-8-sig")
     return df
 
@@ -2256,15 +2430,8 @@ with st.expander("➕ 포트폴리오 추가/수정/삭제", expanded=False):
     st.divider()
     st.subheader("선택 종목 상세분석")
 
-    # 포트폴리오가 비어 있을 때 result_df/sorted_result_df가 생성되지 않아 발생하는 오류 방지
-    if "sorted_result_df" in locals():
-        detail_source_df = sorted_result_df
-    elif "result_df" in locals():
-        detail_source_df = result_df
-    else:
-        detail_source_df = pd.DataFrame()
-
-    if not detail_source_df.empty and "종목명" in detail_source_df.columns:
+    detail_source_df = sorted_result_df if "sorted_result_df" in locals() else result_df
+    if not detail_source_df.empty:
         selected_detail_stock = st.selectbox(
                 "상세분석 종목 선택",
                 detail_source_df["종목명"].tolist(),
@@ -2276,8 +2443,6 @@ with st.expander("➕ 포트폴리오 추가/수정/삭제", expanded=False):
             selected_detail_row.get("종목코드", ""),
             key_prefix="portfolio_detail"
         )
-    else:
-        st.info("상세분석할 종목이 없습니다. 먼저 포트폴리오에 종목을 추가하세요.")
 
 # -----------------------------
 # TAB 2: 관심그룹
