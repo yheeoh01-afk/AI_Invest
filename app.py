@@ -2256,8 +2256,15 @@ with st.expander("➕ 포트폴리오 추가/수정/삭제", expanded=False):
     st.divider()
     st.subheader("선택 종목 상세분석")
 
-    detail_source_df = sorted_result_df if "sorted_result_df" in locals() else result_df
-    if not detail_source_df.empty:
+    # 포트폴리오가 비어 있을 때 result_df/sorted_result_df가 생성되지 않아 발생하는 오류 방지
+    if "sorted_result_df" in locals():
+        detail_source_df = sorted_result_df
+    elif "result_df" in locals():
+        detail_source_df = result_df
+    else:
+        detail_source_df = pd.DataFrame()
+
+    if not detail_source_df.empty and "종목명" in detail_source_df.columns:
         selected_detail_stock = st.selectbox(
                 "상세분석 종목 선택",
                 detail_source_df["종목명"].tolist(),
@@ -2269,6 +2276,8 @@ with st.expander("➕ 포트폴리오 추가/수정/삭제", expanded=False):
             selected_detail_row.get("종목코드", ""),
             key_prefix="portfolio_detail"
         )
+    else:
+        st.info("상세분석할 종목이 없습니다. 먼저 포트폴리오에 종목을 추가하세요.")
 
 # -----------------------------
 # TAB 2: 관심그룹
