@@ -1,6 +1,7 @@
 streamlit
 pandas
 requests
-pykrx
 streamlit-aggrid
-setuptools
+setuptools<81
+wheel
+pykrx==1.0.45
