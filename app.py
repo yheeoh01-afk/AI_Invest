@@ -70,7 +70,7 @@ except Exception:
 
 
 # =========================================================
-# AI 투자비서 V8.13.13
+# AI 투자비서 V9.2
 # 기능:
 # - 포트폴리오 조회 / 추가 / 수정 / 삭제
 # - CSV 저장
@@ -441,6 +441,18 @@ def normalize_portfolio(df):
         .str.zfill(6)
     )
     df.loc[df["종목코드"].isin(["000000", "nan", "None"]), "종목코드"] = ""
+
+    # V9.2: 종목코드가 비어 있으면 저장 시점에 종목명으로 자동 보정합니다.
+    # Streamlit data_editor는 입력 직후 한 번 더 rerun되어야 코드가 보이는 문제가 있어,
+    # 화면 입력 단계가 아니라 정규화/저장 단계에서 확정 보정하는 방식이 가장 안정적입니다.
+    def _fill_ticker(row):
+        current = str(row.get("종목코드", "")).strip()
+        if current:
+            return current.zfill(6)
+        found = find_ticker(row.get("종목명", ""))
+        return found or ""
+
+    df["종목코드"] = df.apply(_fill_ticker, axis=1)
     df["수량"] = df["수량"].apply(to_number).astype(int)
     df["평균매수가"] = df["평균매수가"].apply(to_number)
     df = df[df["종목명"] != ""].reset_index(drop=True)
@@ -530,6 +542,16 @@ def normalize_watchlist(df):
     )
     df.loc[df["종목코드"].isin(["nan", "None", "000000"]), "종목코드"] = ""
     df.loc[df["종목코드"] != "", "종목코드"] = df.loc[df["종목코드"] != "", "종목코드"].str.zfill(6)
+
+    # V9.2: 관심종목도 종목코드가 비어 있으면 저장 시 자동 보정합니다.
+    def _fill_watch_ticker(row):
+        current = str(row.get("종목코드", "")).strip()
+        if current:
+            return current.zfill(6)
+        found = find_ticker(row.get("종목명", ""))
+        return found or ""
+
+    df["종목코드"] = df.apply(_fill_watch_ticker, axis=1)
     df["메모"] = df["메모"].fillna("").astype(str).replace("nan", "")
     df = df[df["종목명"] != ""].reset_index(drop=True)
     return df
@@ -757,48 +779,71 @@ def get_price_data(ticker, days=220):
 
 
 @st.cache_data(ttl=60 * 30)
+@st.cache_data(ttl=60 * 30)
 def get_investor_trading_data(ticker, days=45):
-    """종목별 외국인/기관 순매수 수량 조회.
+    """종목별 외국인/기관 순매수 조회.
 
-    PyKRX의 get_market_trading_volume_by_date를 사용합니다.
-    반환 컬럼명은 PyKRX 버전에 따라 조금 다를 수 있어 외국인/기관 컬럼을 유연하게 찾습니다.
+    V9.2 개선:
+    - PyKRX 버전에 따라 투자자별 컬럼명이 다르게 나오는 문제를 보정합니다.
+    - 수량(volume) 조회가 실패하면 거래대금(value) 조회로 한 번 더 시도합니다.
+    - 기관합계/외국인합계 컬럼을 우선 사용하고, 없으면 유사 컬럼을 자동 탐색합니다.
     """
+    if not ticker:
+        return pd.DataFrame()
+
+    ticker = str(ticker).zfill(6)
     end_date = datetime.today()
     start_date = end_date - timedelta(days=days * 2)
+    start = start_date.strftime("%Y%m%d")
+    end = end_date.strftime("%Y%m%d")
 
-    try:
-        df = stock.get_market_trading_volume_by_date(
-            start_date.strftime("%Y%m%d"),
-            end_date.strftime("%Y%m%d"),
-            ticker
-        )
-    except Exception:
+    raw_df = pd.DataFrame()
+    for getter_name in ["get_market_trading_volume_by_date", "get_market_trading_value_by_date"]:
+        try:
+            getter = getattr(stock, getter_name)
+            raw_df = getter(start, end, ticker)
+            if raw_df is not None and not raw_df.empty:
+                break
+        except Exception:
+            raw_df = pd.DataFrame()
+
+    if raw_df is None or raw_df.empty:
         return pd.DataFrame()
 
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    df = df.copy()
+    df = raw_df.copy()
     df.index = pd.to_datetime(df.index)
 
-    foreign_col = None
-    institution_col = None
+    def pick_column(candidates, contains_any=None, exclude_any=None):
+        cols = list(df.columns)
+        for c in candidates:
+            if c in cols:
+                return c
+        contains_any = contains_any or []
+        exclude_any = exclude_any or []
+        for col in cols:
+            text = str(col)
+            if all(x not in text for x in exclude_any) and any(x in text for x in contains_any):
+                return col
+        return None
 
-    for col in df.columns:
-        col_text = str(col)
-        if "외국인" in col_text:
-            foreign_col = col
-        if "기관" in col_text:
-            institution_col = col
+    foreign_col = pick_column(
+        ["외국인합계", "외국인", "외국인 순매수", "기타외국인"],
+        contains_any=["외국인"],
+        exclude_any=[]
+    )
+    institution_col = pick_column(
+        ["기관합계", "기관", "기관 순매수"],
+        contains_any=["기관"],
+        exclude_any=[]
+    )
 
     result = pd.DataFrame(index=df.index)
-    result["외국인"] = df[foreign_col] if foreign_col is not None else 0
-    result["기관"] = df[institution_col] if institution_col is not None else 0
+    result["외국인"] = pd.to_numeric(df[foreign_col], errors="coerce").fillna(0) if foreign_col else 0
+    result["기관"] = pd.to_numeric(df[institution_col], errors="coerce").fillna(0) if institution_col else 0
     result["외국인_누적"] = result["외국인"].cumsum()
     result["기관_누적"] = result["기관"].cumsum()
 
     return result.tail(days)
-
 
 def analyze_sell_signal(price_df, supply_df=None):
     """
@@ -1796,7 +1841,7 @@ def analyze_weekly_signal(ticker):
     try:
         end = datetime.today()
         start = end - timedelta(days=800)
-        df = stock.get_market_ohlcv(start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), ticker)
+        df = stock.get_market_ohlcv_by_date(start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), ticker)
 
         if df is None or len(df) < 200:
             return "데이터부족", []
@@ -2187,7 +2232,7 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
 # -----------------------------
 # 화면 시작
 # -----------------------------
-st.title("📈 AI 투자비서 Web V8.13.13")
+st.title("📈 AI 투자비서 Web V9.2")
 st.caption("PC용 최종버전 기반 · 사용자별 포트폴리오 · CSV 업로드/다운로드 · 상세분석 · 뉴스 · 수급 · 모바일/Cloud 지원")
 
 with st.sidebar:
@@ -2396,6 +2441,9 @@ with st.expander("➕ 포트폴리오 추가/수정/삭제", expanded=False):
         save_portfolio(uploaded_df)
         st.success("업로드한 포트폴리오 CSV를 현재 로그인 사용자 계정에 저장했습니다.")
         st.rerun()
+
+
+    st.caption("V9.2: 표에서 종목코드를 비워두고 종목명만 입력해도 저장 시 자동으로 종목코드가 채워집니다.")
 
     edited_df = st.data_editor(
         portfolio_df,
