@@ -465,9 +465,10 @@ def normalize_portfolio(df):
 
 
 def load_portfolio():
-    # Supabase 설정이 있으면 DB에서 먼저 불러옵니다. 실패/미설정 시 CSV로 자동 대체합니다.
+    # Supabase에 실제 데이터가 있을 때만 DB를 사용합니다.
+    # Supabase가 비어 있거나 RLS/저장 오류가 있으면 사용자별 CSV 저장소를 읽습니다.
     sb_df = load_portfolio_from_supabase()
-    if sb_df is not None:
+    if sb_df is not None and not sb_df.empty:
         return normalize_portfolio(sb_df)
 
     df = ensure_csv_file(PORTFOLIO_FILE, PORTFOLIO_COLUMNS)
@@ -561,8 +562,10 @@ def normalize_watchlist(df):
 
 
 def load_watchlist():
+    # Supabase에 실제 관심그룹 데이터가 있을 때만 DB를 사용합니다.
+    # Supabase가 비어 있거나 RLS/저장 오류가 있으면 사용자별 CSV 저장소를 읽습니다.
     sb_df = load_watchlist_from_supabase()
-    if sb_df is not None:
+    if sb_df is not None and not sb_df.empty:
         return normalize_watchlist(sb_df)
 
     df = ensure_csv_file(WATCHLIST_FILE, WATCHLIST_COLUMNS)
@@ -2235,7 +2238,7 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
 # -----------------------------
 # 화면 시작
 # -----------------------------
-st.title("📈 AI 투자비서 Web V9.3")
+st.title("📈 AI 투자비서 Web V9.4")
 st.caption("PC용 최종버전 기반 · 사용자별 포트폴리오 · CSV 업로드/다운로드 · 상세분석 · 뉴스 · 수급 · 모바일/Cloud 지원")
 
 with st.sidebar:
@@ -2446,7 +2449,7 @@ with st.expander("➕ 포트폴리오 추가/수정/삭제", expanded=False):
         st.rerun()
 
 
-    st.caption("V9.2: 표에서 종목코드를 비워두고 종목명만 입력해도 저장 시 자동으로 종목코드가 채워집니다.")
+    st.caption("V9.4: Supabase가 비어 있거나 저장 권한 오류가 있어도 CSV 업로드 데이터가 우선 반영됩니다.")
 
     edited_df = st.data_editor(
         portfolio_df,
