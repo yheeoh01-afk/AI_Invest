@@ -70,7 +70,7 @@ except Exception:
 
 
 # =========================================================
-# AI 투자비서 V9.2
+# AI 투자비서 V9.3
 # 기능:
 # - 포트폴리오 조회 / 추가 / 수정 / 삭제
 # - CSV 저장
@@ -205,6 +205,9 @@ def configure_user_files():
 def get_supabase_config():
     try:
         url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
+        # Secrets에 https://xxxxx.supabase.co/rest/v1 로 넣어도 자동 보정
+        if url.endswith("/rest/v1"):
+            url = url[:-8].rstrip("/")
         key = str(st.secrets.get("SUPABASE_ANON_KEY", st.secrets.get("SUPABASE_KEY", ""))).strip()
     except Exception:
         url, key = "", ""
@@ -2232,7 +2235,7 @@ def render_stock_detail(company_name, ticker_hint=None, key_prefix="detail"):
 # -----------------------------
 # 화면 시작
 # -----------------------------
-st.title("📈 AI 투자비서 Web V9.2")
+st.title("📈 AI 투자비서 Web V9.3")
 st.caption("PC용 최종버전 기반 · 사용자별 포트폴리오 · CSV 업로드/다운로드 · 상세분석 · 뉴스 · 수급 · 모바일/Cloud 지원")
 
 with st.sidebar:
@@ -2478,8 +2481,14 @@ with st.expander("➕ 포트폴리오 추가/수정/삭제", expanded=False):
     st.divider()
     st.subheader("선택 종목 상세분석")
 
-    detail_source_df = sorted_result_df if "sorted_result_df" in locals() else result_df
-    if not detail_source_df.empty:
+    if "sorted_result_df" in locals():
+        detail_source_df = sorted_result_df
+    elif "result_df" in locals():
+        detail_source_df = result_df
+    else:
+        detail_source_df = pd.DataFrame()
+
+    if detail_source_df is not None and not detail_source_df.empty:
         selected_detail_stock = st.selectbox(
                 "상세분석 종목 선택",
                 detail_source_df["종목명"].tolist(),
