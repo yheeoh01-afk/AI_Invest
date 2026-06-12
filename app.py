@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-APP_VERSION = "V10 CSV Fast"
+APP_VERSION = "V11 CSV Fast Stable"
 DATA_ROOT = os.environ.get("AI_INVEST_DATA_DIR", "user_data")
 PORTFOLIO_COLUMNS = ["종목명", "종목코드", "수량", "평균매수가", "투자액"]
 WATCHLIST_COLUMNS = ["그룹", "종목명", "종목코드", "메모"]
@@ -88,8 +88,13 @@ def read_csv_any(file_or_path):
 
 def lazy_stock():
     # 앱 시작 속도를 위해 pykrx는 분석 버튼을 누를 때만 import합니다.
-    from pykrx import stock
-    return stock
+    try:
+        from pykrx import stock
+        return stock
+    except ModuleNotFoundError as e:
+        if "pkg_resources" in str(e):
+            raise RuntimeError("requirements.txt에 setuptools==69.5.1 이 설치되어야 합니다. Streamlit Cloud에서 Clear cache 후 Reboot 해주세요.")
+        raise
 
 
 @st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
@@ -184,14 +189,25 @@ def user_paths():
     return user, user_dir, os.path.join(user_dir, "portfolio.csv"), os.path.join(user_dir, "watchlist.csv")
 
 
-def ensure_file(path, columns):
-    if not os.path.exists(path):
-        pd.DataFrame(columns=columns).to_csv(path, index=False, encoding="utf-8-sig")
+def ensure_file(path, columns, root_fallback=None):
+    """사용자별 CSV가 없으면 생성합니다.
+    GitHub 루트에 portfolio.csv/watchlist.csv가 있으면 최초 1회 복사해 초기 데이터로 사용합니다.
+    """
+    if os.path.exists(path):
+        return
+    if root_fallback and os.path.exists(root_fallback):
+        try:
+            df = read_csv_any(root_fallback)
+            df.to_csv(path, index=False, encoding="utf-8-sig")
+            return
+        except Exception:
+            pass
+    pd.DataFrame(columns=columns).to_csv(path, index=False, encoding="utf-8-sig")
 
 
 def load_portfolio():
     _, _, path, _ = user_paths()
-    ensure_file(path, PORTFOLIO_COLUMNS)
+    ensure_file(path, PORTFOLIO_COLUMNS, root_fallback="portfolio.csv")
     df = read_csv_any(path)
     return normalize_portfolio(df)
 
@@ -206,7 +222,7 @@ def save_portfolio(df):
 
 def load_watchlist():
     _, _, _, path = user_paths()
-    ensure_file(path, WATCHLIST_COLUMNS)
+    ensure_file(path, WATCHLIST_COLUMNS, root_fallback="watchlist.csv")
     return normalize_watchlist(read_csv_any(path))
 
 
@@ -237,7 +253,7 @@ def login_gate():
     if st.session_state.get("logged_in"):
         return
     st.title("📈 AI 투자비서 웹버전")
-    st.caption("CSV 전용 빠른 버전입니다. 앱 시작 때 무거운 분석을 하지 않습니다.")
+    st.caption("CSV 전용 빠른 안정버전입니다. 앱 시작 때 무거운 분석을 하지 않습니다.")
     with st.form("login_form"):
         user_id = st.text_input("아이디")
         password = st.text_input("비밀번호", type="password")
@@ -454,10 +470,10 @@ with st.sidebar:
     st.code(portfolio_path)
     st.caption("관심그룹 CSV 파일")
     st.code(watchlist_path)
-    st.caption("V10은 Supabase를 사용하지 않습니다. 앱 시작 속도를 위해 분석은 버튼을 누를 때만 실행합니다.")
+    st.caption("V11은 Supabase를 사용하지 않습니다. 앱 시작 속도를 위해 분석은 버튼을 누를 때만 실행합니다.")
 
 st.title(f"📈 AI 투자비서 Web {APP_VERSION}")
-st.caption("CSV 전용 빠른 버전 · 사용자별 포트폴리오 · 업로드/다운로드 · 버튼식 분석")
+st.caption("Supabase 제거 · 사용자별 CSV 저장 · 포트폴리오 즉시 표시 · 분석은 버튼 실행")
 
 tab_port, tab_watch, tab_stock, tab_news = st.tabs(["📊 포트폴리오", "⭐ 관심그룹", "🔍 종목분석", "📰 뉴스"])
 
