@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-APP_VERSION = "V11.1 CSV Fast + Supply"
+APP_VERSION = "V11.4 Supply Diagnostic"
 DATA_ROOT = os.environ.get("AI_INVEST_DATA_DIR", "user_data")
 PORTFOLIO_COLUMNS = ["종목명", "종목코드", "수량", "평균매수가", "투자액"]
 WATCHLIST_COLUMNS = ["그룹", "종목명", "종목코드", "메모"]
@@ -565,10 +565,70 @@ with st.sidebar:
     st.code(watchlist_path)
     st.caption("V11은 Supabase를 사용하지 않습니다. 앱 시작 속도를 위해 분석은 버튼을 누를 때만 실행합니다.")
 
+
+
+def supply_raw_diagnostics(ticker, days=45):
+    """Streamlit Cloud에서 PyKRX 수급 원본이 어떻게 내려오는지 확인하는 진단 함수."""
+    stock = lazy_stock()
+    end = datetime.today()
+    start = end - timedelta(days=days * 4)
+    start_s, end_s = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+    tests = [
+        ("거래량 detail=True", "get_market_trading_volume_by_date", {"detail": True}),
+        ("거래량 기본", "get_market_trading_volume_by_date", {}),
+        ("거래대금 detail=True", "get_market_trading_value_by_date", {"detail": True}),
+        ("거래대금 기본", "get_market_trading_value_by_date", {}),
+    ]
+    results = []
+    for label, fn_name, kwargs in tests:
+        item = {"label": label, "fn": fn_name, "kwargs": kwargs}
+        try:
+            fn = getattr(stock, fn_name)
+            df = fn(start_s, end_s, ticker, **kwargs)
+            if df is None:
+                item.update({"ok": False, "error": "반환값 None", "df": pd.DataFrame()})
+            elif df.empty:
+                item.update({"ok": True, "empty": True, "shape": df.shape, "columns": list(map(str, df.columns)), "df": df})
+            else:
+                df2 = df.copy()
+                try:
+                    df2.index = pd.to_datetime(df2.index)
+                except Exception:
+                    pass
+                item.update({
+                    "ok": True,
+                    "empty": False,
+                    "shape": df2.shape,
+                    "columns": list(map(str, df2.columns)),
+                    "df": df2,
+                })
+        except Exception as e:
+            item.update({"ok": False, "error": repr(e), "df": pd.DataFrame()})
+        results.append(item)
+    return results
+
+
+def summarize_supply_raw(df):
+    """원본 수급 DF의 숫자 합계를 보기 쉽게 요약."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    tmp = df.copy()
+    rows = []
+    for col in tmp.columns:
+        ser = pd.to_numeric(
+            tmp[col].astype(str)
+            .str.replace(",", "", regex=False)
+            .str.replace(" ", "", regex=False)
+            .str.replace("−", "-", regex=False),
+            errors="coerce"
+        ).fillna(0)
+        rows.append({"컬럼명": str(col), "최근5일합": ser.tail(5).sum(), "최근20일합": ser.tail(20).sum(), "전체합": ser.sum()})
+    return pd.DataFrame(rows)
+
 st.title(f"📈 AI 투자비서 Web {APP_VERSION}")
 st.caption("Supabase 제거 · 사용자별 CSV 저장 · 포트폴리오 즉시 표시 · 분석은 버튼 실행")
 
-tab_port, tab_watch, tab_stock, tab_news = st.tabs(["📊 포트폴리오", "⭐ 관심그룹", "🔍 종목분석", "📰 뉴스"])
+tab_port, tab_watch, tab_stock, tab_news, tab_diag = st.tabs(["📊 포트폴리오", "⭐ 관심그룹", "🔍 종목분석", "📰 뉴스", "🧪 수급진단"])
 
 with tab_port:
     st.subheader("포트폴리오 현황")
@@ -675,7 +735,7 @@ with tab_stock:
                 st.write("매수신호:", buy_grade, "/", ", ".join(buy_detail) if buy_detail else "-")
                 st.write("매도상세:", ", ".join(sell_detail) if sell_detail else "-")
                 st.line_chart(price_df[["종가", "MA5", "MA20", "MA60"]].dropna())
-                if single_supply and not supply_df.empty:
+                if not supply_df.empty:
                     st.line_chart(supply_df[["외국인_누적", "기관_누적"]])
 
 with tab_news:
@@ -687,3 +747,52 @@ with tab_news:
             st.info("뉴스가 없거나 NAVER API 키가 설정되지 않았습니다.")
         for item in news:
             st.markdown(f"- [{item['제목']}]({item['링크']})  \n  <small>{item['날짜']}</small>", unsafe_allow_html=True)
+
+
+with tab_diag:
+    st.subheader("🧪 PyKRX 수급 원본 진단")
+    st.caption("여기서 나오는 원본 컬럼과 값으로 웹앱 수급 오류 원인을 확인합니다. 삼성전자(005930)부터 테스트하세요.")
+    col_a, col_b, col_c = st.columns([2, 1, 1])
+    diag_input = col_a.text_input("진단할 종목명 또는 종목코드", value="삼성전자", key="diag_stock_input")
+    diag_days = col_b.number_input("조회일수", min_value=10, max_value=120, value=45, step=5)
+    run_diag = col_c.button("수급 원본 진단 실행", type="primary")
+
+    if run_diag:
+        ticker = find_ticker(diag_input)
+        if not ticker:
+            st.error("종목코드를 찾지 못했습니다. 예: 005930 처럼 직접 입력해보세요.")
+        else:
+            st.info(f"진단 종목코드: {ticker}")
+            with st.spinner("PyKRX 수급 원본 데이터를 조회 중입니다..."):
+                raw_results = supply_raw_diagnostics(ticker, days=int(diag_days))
+                normalized = get_supply_data(ticker, days=int(diag_days))
+
+            st.markdown("### 1) 앱이 최종 변환한 수급 데이터")
+            if normalized.empty:
+                st.warning("get_supply_data() 최종 결과가 비어 있습니다.")
+            else:
+                st.write("컬럼:", list(normalized.columns))
+                st.dataframe(normalized.tail(20), use_container_width=True)
+                st.write("최근 5일 외국인 합:", int(normalized["외국인"].tail(5).sum()))
+                st.write("최근 5일 기관 합:", int(normalized["기관"].tail(5).sum()))
+
+            st.markdown("### 2) PyKRX 원본 호출 결과")
+            for item in raw_results:
+                label = item.get("label")
+                with st.expander(f"{label} / {item.get('fn')} / {item.get('kwargs')}", expanded=True):
+                    if not item.get("ok"):
+                        st.error(item.get("error", "알 수 없는 오류"))
+                        continue
+                    st.write("shape:", item.get("shape"))
+                    st.write("columns:", item.get("columns"))
+                    df = item.get("df", pd.DataFrame())
+                    if df.empty:
+                        st.warning("원본 DataFrame이 비어 있습니다.")
+                    else:
+                        st.markdown("**최근 10행 원본**")
+                        st.dataframe(df.tail(10), use_container_width=True)
+                        st.markdown("**컬럼별 합계 요약**")
+                        st.dataframe(summarize_supply_raw(df), use_container_width=True, hide_index=True)
+
+            st.markdown("### 3) 다음 조치")
+            st.info("이 화면에서 'columns'와 최근 10행 원본 캡처를 보내주면, 어떤 컬럼을 외국인/기관으로 계산해야 하는지 바로 맞출 수 있습니다.")
