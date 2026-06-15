@@ -252,7 +252,7 @@ def get_login_users():
 def login_gate():
     if st.session_state.get("logged_in"):
         return
-    st.title("📈 AI 투자비서 웹버전")
+    st.title("📈 AI 투자비서 웹버전 V11.2")
     st.caption("CSV 전용 빠른 안정버전입니다. 앱 시작 때 무거운 분석을 하지 않습니다.")
     with st.form("login_form"):
         user_id = st.text_input("아이디")
@@ -301,54 +301,80 @@ def get_price_data(ticker, days=220):
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_supply_data(ticker, days=45):
-    """외국인/기관 순매수 데이터를 불러옵니다.
-    PyKRX 버전별 컬럼명이 달라서 외국인합계/외국인, 기관합계/기관을 유연하게 찾습니다.
+    """외국인/기관 순매수 데이터.
+    PyKRX 버전/시장별 컬럼 차이를 최대한 흡수합니다.
+    - 외국인: 외국인합계/외국인 컬럼 사용
+    - 기관: 기관합계이 있으면 사용, 없으면 금융투자·보험·투신·사모·은행·기타금융·연기금 등을 합산
     """
     stock = lazy_stock()
     end = datetime.today()
-    start = end - timedelta(days=days * 2)
+    start = end - timedelta(days=days * 3)
     start_s, end_s = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
-    try:
-        df = stock.get_market_trading_volume_by_date(start_s, end_s, ticker)
-    except Exception:
-        df = pd.DataFrame()
-
-    # 일부 환경에서 volume API가 비어 있으면 value API도 한 번 시도
-    if df is None or df.empty:
+    dfs = []
+    for getter_name in ["get_market_trading_volume_by_date", "get_market_trading_value_by_date"]:
         try:
-            df = stock.get_market_trading_value_by_date(start_s, end_s, ticker)
+            getter = getattr(stock, getter_name)
+            df_try = getter(start_s, end_s, ticker)
+            if df_try is not None and not df_try.empty:
+                dfs.append(df_try.copy())
         except Exception:
-            return pd.DataFrame()
+            pass
 
-    if df is None or df.empty:
+    if not dfs:
         return pd.DataFrame()
 
-    df = df.copy()
+    df = dfs[0]
     df.index = pd.to_datetime(df.index)
 
+    def clean_num(series):
+        return pd.to_numeric(
+            series.astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
+            errors="coerce"
+        ).fillna(0)
+
     cols = list(df.columns)
-    def pick_col(candidates):
-        # 정확히 일치 우선
-        for cand in candidates:
-            for c in cols:
-                if str(c) == cand:
+    col_text = {c: str(c).replace(" ", "") for c in cols}
+
+    def find_col(names):
+        names = [n.replace(" ", "") for n in names]
+        for target in names:
+            for c, t in col_text.items():
+                if t == target:
                     return c
-        # 포함 검색
-        for cand in candidates:
-            for c in cols:
-                if cand in str(c):
+        for target in names:
+            for c, t in col_text.items():
+                if target in t:
                     return c
         return None
 
-    foreign_col = pick_col(["외국인합계", "외국인", "외국인 순매수"])
-    inst_col = pick_col(["기관합계", "기관", "기관 순매수"])
+    foreign_col = find_col(["외국인합계", "외국인"])
+    inst_col = find_col(["기관합계", "기관"])
+
+    institutional_candidates = [
+        "금융투자", "보험", "투신", "사모", "은행", "기타금융",
+        "연기금", "연기금등", "국가지자체", "기관합계"
+    ]
 
     out = pd.DataFrame(index=df.index)
-    out["외국인"] = pd.to_numeric(df[foreign_col], errors="coerce").fillna(0) if foreign_col is not None else 0
-    out["기관"] = pd.to_numeric(df[inst_col], errors="coerce").fillna(0) if inst_col is not None else 0
+    out["외국인"] = clean_num(df[foreign_col]) if foreign_col is not None else 0
+
+    if inst_col is not None:
+        out["기관"] = clean_num(df[inst_col])
+    else:
+        inst_sum = pd.Series(0, index=df.index, dtype="float64")
+        used = set()
+        for name in institutional_candidates:
+            c = find_col([name])
+            if c is not None and c not in used:
+                inst_sum = inst_sum + clean_num(df[c])
+                used.add(c)
+        out["기관"] = inst_sum
+
     out["외국인_누적"] = out["외국인"].cumsum()
     out["기관_누적"] = out["기관"].cumsum()
+
+    # 실제 값이 전부 0이어도 빈 데이터와 구분하기 위해 최근 days개를 반환합니다.
     return out.tail(days)
 
 
@@ -559,10 +585,10 @@ with tab_port:
 
     st.divider()
     st.subheader("포트폴리오 분석")
-    include_supply = st.checkbox("수급까지 함께 분석", value=True, help="외국인/기관/수급신호를 보려면 체크하세요. 종목 수가 많으면 시간이 조금 걸릴 수 있습니다.")
+    st.caption("외국인/기관 수급은 항상 함께 분석합니다. 종목 수가 많으면 시간이 조금 걸릴 수 있습니다.")
     if st.button("📊 포트폴리오 분석 실행", type="primary", disabled=portfolio_df.empty):
-        with st.spinner("현재가와 신호를 분석 중입니다. 종목 수에 따라 시간이 걸릴 수 있습니다."):
-            result_df = analyze_portfolio(portfolio_df, include_supply=include_supply)
+        with st.spinner("현재가, 외국인/기관 수급, 매수·매도 신호를 분석 중입니다. 종목 수에 따라 시간이 걸릴 수 있습니다."):
+            result_df = analyze_portfolio(portfolio_df, include_supply=True)
         st.session_state["analysis_result"] = result_df
     if "analysis_result" in st.session_state and not st.session_state["analysis_result"].empty:
         result_df = st.session_state["analysis_result"]
@@ -589,9 +615,7 @@ with tab_watch:
 
 with tab_stock:
     st.subheader("단일 종목 분석")
-    col1, col2 = st.columns([2, 1])
-    single_name = col1.text_input("종목명 또는 종목코드", placeholder="예: LG이노텍")
-    single_supply = col2.checkbox("수급 포함", value=True, key="single_supply")
+    single_name = st.text_input("종목명 또는 종목코드", placeholder="예: LG이노텍")
     if st.button("🔍 분석", disabled=not single_name.strip()):
         ticker = find_ticker(single_name)
         if not ticker:
@@ -599,7 +623,7 @@ with tab_stock:
         else:
             with st.spinner("분석 중입니다."):
                 price_df = get_price_data(ticker)
-                supply_df = get_supply_data(ticker) if single_supply else pd.DataFrame()
+                supply_df = get_supply_data(ticker)
                 buy_grade, buy_detail, buy_score = analyze_buy_signal(price_df, supply_df)
                 sell_grade, sell_detail = analyze_sell_signal(price_df, supply_df)
             if price_df.empty:
