@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-APP_VERSION = "V11 CSV Fast Stable"
+APP_VERSION = "V11.1 CSV Fast + Supply"
 DATA_ROOT = os.environ.get("AI_INVEST_DATA_DIR", "user_data")
 PORTFOLIO_COLUMNS = ["종목명", "종목코드", "수량", "평균매수가", "투자액"]
 WATCHLIST_COLUMNS = ["그룹", "종목명", "종목코드", "메모"]
@@ -301,22 +301,52 @@ def get_price_data(ticker, days=220):
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_supply_data(ticker, days=45):
+    """외국인/기관 순매수 데이터를 불러옵니다.
+    PyKRX 버전별 컬럼명이 달라서 외국인합계/외국인, 기관합계/기관을 유연하게 찾습니다.
+    """
     stock = lazy_stock()
     end = datetime.today()
     start = end - timedelta(days=days * 2)
+    start_s, end_s = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+
     try:
-        df = stock.get_market_trading_volume_by_date(start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), ticker)
+        df = stock.get_market_trading_volume_by_date(start_s, end_s, ticker)
     except Exception:
-        return pd.DataFrame()
+        df = pd.DataFrame()
+
+    # 일부 환경에서 volume API가 비어 있으면 value API도 한 번 시도
+    if df is None or df.empty:
+        try:
+            df = stock.get_market_trading_value_by_date(start_s, end_s, ticker)
+        except Exception:
+            return pd.DataFrame()
+
     if df is None or df.empty:
         return pd.DataFrame()
+
     df = df.copy()
     df.index = pd.to_datetime(df.index)
-    foreign_col = next((c for c in df.columns if "외국인" in str(c)), None)
-    inst_col = next((c for c in df.columns if "기관" in str(c)), None)
+
+    cols = list(df.columns)
+    def pick_col(candidates):
+        # 정확히 일치 우선
+        for cand in candidates:
+            for c in cols:
+                if str(c) == cand:
+                    return c
+        # 포함 검색
+        for cand in candidates:
+            for c in cols:
+                if cand in str(c):
+                    return c
+        return None
+
+    foreign_col = pick_col(["외국인합계", "외국인", "외국인 순매수"])
+    inst_col = pick_col(["기관합계", "기관", "기관 순매수"])
+
     out = pd.DataFrame(index=df.index)
-    out["외국인"] = df[foreign_col] if foreign_col is not None else 0
-    out["기관"] = df[inst_col] if inst_col is not None else 0
+    out["외국인"] = pd.to_numeric(df[foreign_col], errors="coerce").fillna(0) if foreign_col is not None else 0
+    out["기관"] = pd.to_numeric(df[inst_col], errors="coerce").fillna(0) if inst_col is not None else 0
     out["외국인_누적"] = out["외국인"].cumsum()
     out["기관_누적"] = out["기관"].cumsum()
     return out.tail(days)
@@ -419,7 +449,7 @@ def analyze_portfolio(df, include_supply=True):
             "종목명": name, "종목코드": ticker, "수량": qty, "평균매수가": int(avg), "현재가": int(current),
             "투자액": int(invest), "평가금액": int(eval_amt), "평가손익": int(pl), "수익률%": round(pl_pct, 2),
             "매수신호": buy_grade, "매수점수": buy_score, "매도신호": sell_grade,
-            "외국인5일": int(f5), "기관5일": int(i5), "수급신호": s_sig,
+            "외국인5일": int(f5) if include_supply else "-", "기관5일": int(i5) if include_supply else "-", "수급신호": s_sig if include_supply else "수급 미분석",
             "매수상세": ", ".join(buy_detail), "매도상세": ", ".join(sell_detail),
         })
         progress.progress(n / total)
@@ -529,7 +559,7 @@ with tab_port:
 
     st.divider()
     st.subheader("포트폴리오 분석")
-    include_supply = st.checkbox("수급까지 함께 분석", value=False, help="수급 조회는 느릴 수 있습니다. 처음에는 꺼두는 것을 추천합니다.")
+    include_supply = st.checkbox("수급까지 함께 분석", value=True, help="외국인/기관/수급신호를 보려면 체크하세요. 종목 수가 많으면 시간이 조금 걸릴 수 있습니다.")
     if st.button("📊 포트폴리오 분석 실행", type="primary", disabled=portfolio_df.empty):
         with st.spinner("현재가와 신호를 분석 중입니다. 종목 수에 따라 시간이 걸릴 수 있습니다."):
             result_df = analyze_portfolio(portfolio_df, include_supply=include_supply)
@@ -561,7 +591,7 @@ with tab_stock:
     st.subheader("단일 종목 분석")
     col1, col2 = st.columns([2, 1])
     single_name = col1.text_input("종목명 또는 종목코드", placeholder="예: LG이노텍")
-    single_supply = col2.checkbox("수급 포함", value=False, key="single_supply")
+    single_supply = col2.checkbox("수급 포함", value=True, key="single_supply")
     if st.button("🔍 분석", disabled=not single_name.strip()):
         ticker = find_ticker(single_name)
         if not ticker:
