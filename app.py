@@ -302,80 +302,117 @@ def get_price_data(ticker, days=220):
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_supply_data(ticker, days=45):
     """외국인/기관 순매수 데이터.
-    PyKRX 버전/시장별 컬럼 차이를 최대한 흡수합니다.
-    - 외국인: 외국인합계/외국인 컬럼 사용
-    - 기관: 기관합계이 있으면 사용, 없으면 금융투자·보험·투신·사모·은행·기타금융·연기금 등을 합산
+    V11.3: PyKRX에서 detail=True를 우선 사용합니다.
+    일부 환경에서 기본 호출은 외국인/기관 컬럼이 빠지거나 0으로 내려오는 경우가 있어
+    상세 투자자별 데이터를 받아서 기관 합계를 직접 계산합니다.
     """
     stock = lazy_stock()
     end = datetime.today()
-    start = end - timedelta(days=days * 3)
+    start = end - timedelta(days=days * 4)
     start_s, end_s = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
-    dfs = []
-    for getter_name in ["get_market_trading_volume_by_date", "get_market_trading_value_by_date"]:
-        try:
-            getter = getattr(stock, getter_name)
-            df_try = getter(start_s, end_s, ticker)
-            if df_try is not None and not df_try.empty:
-                dfs.append(df_try.copy())
-        except Exception:
-            pass
+    candidates = []
 
-    if not dfs:
+    # 1순위: 거래량, 상세 투자자별. 가장 안정적입니다.
+    try:
+        df = stock.get_market_trading_volume_by_date(start_s, end_s, ticker, detail=True)
+        if df is not None and not df.empty:
+            candidates.append(df.copy())
+    except Exception:
+        pass
+
+    # 2순위: 거래량, 기본 합계형
+    try:
+        df = stock.get_market_trading_volume_by_date(start_s, end_s, ticker)
+        if df is not None and not df.empty:
+            candidates.append(df.copy())
+    except Exception:
+        pass
+
+    # 3순위: 거래대금, 상세 투자자별
+    try:
+        df = stock.get_market_trading_value_by_date(start_s, end_s, ticker, detail=True)
+        if df is not None and not df.empty:
+            candidates.append(df.copy())
+    except Exception:
+        pass
+
+    # 4순위: 거래대금, 기본 합계형
+    try:
+        df = stock.get_market_trading_value_by_date(start_s, end_s, ticker)
+        if df is not None and not df.empty:
+            candidates.append(df.copy())
+    except Exception:
+        pass
+
+    if not candidates:
         return pd.DataFrame()
-
-    df = dfs[0]
-    df.index = pd.to_datetime(df.index)
 
     def clean_num(series):
         return pd.to_numeric(
-            series.astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
+            series.astype(str)
+            .str.replace(",", "", regex=False)
+            .str.replace(" ", "", regex=False)
+            .str.replace("−", "-", regex=False),
             errors="coerce"
         ).fillna(0)
 
-    cols = list(df.columns)
-    col_text = {c: str(c).replace(" ", "") for c in cols}
+    def normalize_one(df):
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+        cols = list(df.columns)
+        col_text = {c: str(c).replace(" ", "") for c in cols}
 
-    def find_col(names):
-        names = [n.replace(" ", "") for n in names]
-        for target in names:
-            for c, t in col_text.items():
-                if t == target:
-                    return c
-        for target in names:
-            for c, t in col_text.items():
-                if target in t:
-                    return c
-        return None
+        def find_col(names):
+            names = [str(n).replace(" ", "") for n in names]
+            for target in names:
+                for c, t in col_text.items():
+                    if t == target:
+                        return c
+            for target in names:
+                for c, t in col_text.items():
+                    if target in t:
+                        return c
+            return None
 
-    foreign_col = find_col(["외국인합계", "외국인"])
-    inst_col = find_col(["기관합계", "기관"])
+        # 외국인은 상세형에서는 외국인, 기본형에서는 외국인합계로 내려옵니다.
+        foreign_col = find_col(["외국인합계", "외국인"])
 
-    institutional_candidates = [
-        "금융투자", "보험", "투신", "사모", "은행", "기타금융",
-        "연기금", "연기금등", "국가지자체", "기관합계"
-    ]
+        # 기본형에는 기관합계가 있을 수 있습니다.
+        inst_col = find_col(["기관합계", "기관"])
 
-    out = pd.DataFrame(index=df.index)
-    out["외국인"] = clean_num(df[foreign_col]) if foreign_col is not None else 0
+        out = pd.DataFrame(index=df.index)
+        out["외국인"] = clean_num(df[foreign_col]) if foreign_col is not None else 0
 
-    if inst_col is not None:
-        out["기관"] = clean_num(df[inst_col])
-    else:
-        inst_sum = pd.Series(0, index=df.index, dtype="float64")
-        used = set()
-        for name in institutional_candidates:
-            c = find_col([name])
-            if c is not None and c not in used:
-                inst_sum = inst_sum + clean_num(df[c])
-                used.add(c)
-        out["기관"] = inst_sum
+        if inst_col is not None:
+            out["기관"] = clean_num(df[inst_col])
+        else:
+            # 상세형에서는 기관합계가 없어서 기관 구성 항목을 직접 합산합니다.
+            inst_names = [
+                "금융투자", "보험", "투신", "사모", "은행", "기타금융",
+                "연기금", "연기금등", "연기금 등", "국가지자체", "국가·지자체",
+            ]
+            inst_sum = pd.Series(0, index=df.index, dtype="float64")
+            used = set()
+            for name in inst_names:
+                c = find_col([name])
+                if c is not None and c not in used:
+                    inst_sum = inst_sum + clean_num(df[c])
+                    used.add(c)
+            out["기관"] = inst_sum
 
-    out["외국인_누적"] = out["외국인"].cumsum()
-    out["기관_누적"] = out["기관"].cumsum()
+        out["외국인_누적"] = out["외국인"].cumsum()
+        out["기관_누적"] = out["기관"].cumsum()
+        return out.tail(days)
 
-    # 실제 값이 전부 0이어도 빈 데이터와 구분하기 위해 최근 days개를 반환합니다.
-    return out.tail(days)
+    # 후보 중 실제 수급값이 있는 첫 데이터를 사용합니다.
+    normalized = [normalize_one(df) for df in candidates]
+    for out in normalized:
+        if out is not None and not out.empty and (out["외국인"].abs().sum() > 0 or out["기관"].abs().sum() > 0):
+            return out
+
+    # 값이 전부 0이면 첫 후보라도 반환해서 빈 데이터와 구분합니다.
+    return normalized[0] if normalized else pd.DataFrame()
 
 
 def analyze_sell_signal(price_df, supply_df=None):
